@@ -1,0 +1,56 @@
+{
+  "name": "pi-poppy",
+  "version": "0.1.0",
+  "description": "Personal Agent Protocol (Poppy) for the pi coding agent — discovery, sessions, sign-in, APIs, conversations, and the operations extension",
+  "license": "MIT",
+  "author": "Richard Anaya",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "files": [
+    "index.ts",
+    "cli.ts",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "bin": {
+    "pi-poppy": "./cli.ts"
+  },
+  "scripts": {
+    "test": "node --experimental-strip-types --test --test-concurrency=1 tests/run.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/richardanaya/pi-poppy.git"
+  },
+  "homepage": "https://github.com/richardanaya/pi-poppy#readme",
+  "bugs": {
+    "url": "https://github.com/richardanaya/pi-poppy/issues"
+  },
+  "keywords": [
+    "pi-package",
+    "poppy",
+    "personal-agent-protocol",
+    "pap",
+    "oauth",
+    "mcp"
+  ],
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "1.0.1",
+    "typebox": "1.3.27"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "1.0.1",
+    "@types/node": "^22.15.0",
+    "typebox": "1.3.27",
+    "typescript": "^5.8.3"
+  }
+}
