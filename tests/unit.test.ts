@@ -106,12 +106,13 @@ test("S001 S004 S042 refusing non-HTTPS and URL credentials", async () => {
 test("S132 metadata fetches drop Authorization, Cookie, and DPoP", async () => {
 	const tls = createTestMaterial();
 	const seen: Array<Record<string, string | undefined>> = [];
+	const header = (value: string | string[] | undefined): string | undefined => (Array.isArray(value) ? value[0] : value);
 	const server = createServer({ cert: tls.certPem, key: tls.keyPem }, (req, res) => {
 		seen.push({
-			authorization: req.headers.authorization,
-			cookie: req.headers.cookie,
-			dpop: req.headers.dpop,
-			accept: req.headers.accept,
+			authorization: header(req.headers.authorization),
+			cookie: header(req.headers.cookie),
+			dpop: header(req.headers.dpop),
+			accept: header(req.headers.accept),
 		});
 		res.writeHead(200, { "content-type": "application/json" });
 		res.end("{}");
