@@ -33,25 +33,25 @@ A company downloads that `client_id` before it will open a session. `jwks_uri` a
 
 Each tool that uses a session takes `domain`, so more than one company can be open. There are no slash commands.
 
-| Tool | What it does |
-| --- | --- |
-| `poppy_discover` | Read the company's protocol document. |
-| `poppy_session_start` | Start a signed-out session for that domain. |
-| `poppy_session_status` | Describe one session, or every open session when `domain` is omitted. Tokens are omitted. |
-| `poppy_sign_in` | Direct, then device, then mediated sign-in for that domain. Passwords are collected in pi's own UI. |
-| `poppy_sign_out` | Revoke that domain's account token. |
-| `poppy_api_call` | Call an OpenAPI endpoint on the company origin with a DPoP session token. |
-| `poppy_conversation_send` | Send a message. `sender` is `human` only for the user's own words. |
-| `poppy_conversation_read` | Read events. A gap is reported when the cursor has expired. |
-| `poppy_conversation_handoff` | Hand the conversation to a person. |
-| `poppy_conversation_close` | Close the conversation. |
-| `poppy_direct_conversation` | Open the one direct child of a parent conversation. |
-| `poppy_operation_show` | Read an operations-extension proposal. |
-| `poppy_operation_confirm` | Confirm the latest revision after the user accepts the company's name and summary, or after a standing permission covers it. |
-| `poppy_operation_cancel` | Cancel a proposal. |
-| `poppy_permission` | Store a standing permission the user accepted in pi's UI. |
-| `poppy_mcp_connect` | Register the company's MCP servers on pi. |
-| `poppy_browser_join` | Post a browser-session assertion from the agent's own cookie jar. |
+| Tool | Parameters | What it does |
+| --- | --- | --- |
+| `poppy_discover` | `domain` | Read the company's protocol document. |
+| `poppy_session_start` | `domain` | Start a signed-out session for that domain. |
+| `poppy_session_status` | `domain` optional | Describe one session, or every open session when `domain` is omitted. Tokens are omitted. |
+| `poppy_sign_in` | `domain`, `scope`, `method` optional (`auto`, `direct`, `device`, or `mediated`) | Direct, then device, then mediated sign-in. Passwords are collected in pi's own UI. |
+| `poppy_sign_out` | `domain` | Revoke that domain's account token. |
+| `poppy_api_call` | `domain`, `path`, `body` optional | Call an OpenAPI endpoint on the company origin with a DPoP session token. |
+| `poppy_conversation_send` | `domain`, `sender` (`agent` or `human`), `text` optional, `data` optional, `locale` optional, `time_zone` optional, `user_available` optional | Send a message. `sender` is `human` only for the user's own words. |
+| `poppy_conversation_read` | `domain`, `wait` optional | Read events. A gap is reported when the cursor has expired. |
+| `poppy_conversation_handoff` | `domain` | Hand the conversation to a person. |
+| `poppy_conversation_close` | `domain` | Close the conversation. |
+| `poppy_direct_conversation` | `domain`, `text` | Open the one direct child of a parent conversation. |
+| `poppy_operation_show` | `domain`, `operation_id` | Read an operations-extension proposal. |
+| `poppy_operation_confirm` | `domain`, `operation_id` | Confirm the latest revision after the user accepts the company's name and summary, or after a standing permission covers it. |
+| `poppy_operation_cancel` | `domain`, `operation_id` | Cancel a proposal. |
+| `poppy_permission` | `domain`, `action`, `max_amount` optional, `currency` optional, `max_uses` optional | Store a standing permission the user accepted in pi's UI. |
+| `poppy_mcp_connect` | `domain` | Register the company's MCP servers on pi. |
+| `poppy_browser_join` | `domain`, `url` | Post a browser-session assertion from the agent's own cookie jar. `url` is an HTTPS page on the company domain. |
 
 ## Examples
 
