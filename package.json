@@ -10,14 +10,10 @@
   },
   "files": [
     "index.ts",
-    "cli.ts",
     "src",
     "README.md",
     "LICENSE"
   ],
-  "bin": {
-    "pi-poppy": "./cli.ts"
-  },
   "scripts": {
     "test": "node --experimental-strip-types --test --test-concurrency=1 tests/run.ts",
     "typecheck": "tsc --noEmit"

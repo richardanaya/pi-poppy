@@ -12,6 +12,8 @@ export interface IdentityServerOptions {
 	kid: string;
 	extensions?: Record<string, { version: string }>;
 	logoUri?: string;
+	/** Bind this port. Omit to let the OS choose one. */
+	port?: number;
 }
 
 /**
@@ -38,7 +40,15 @@ export class IdentityServer {
 		this.server = createServer({ cert: this.options.cert, key: this.options.key }, (req, res) => {
 			void this.handle(req, res);
 		});
-		await new Promise<void>((resolve) => this.server!.listen(0, "127.0.0.1", resolve));
+		await new Promise<void>((resolve, reject) => {
+			const server = this.server!;
+			server.once("error", reject);
+			server.listen(this.options.port ?? 0, "127.0.0.1", () => {
+				server.off("error", reject);
+				server.unref();
+				resolve();
+			});
+		});
 		const port = (this.server.address() as AddressInfo).port;
 		this.base = `https://127.0.0.1:${port}`;
 		(this as { clientId: string }).clientId = `${this.base}/agent.json`;

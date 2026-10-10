@@ -32,14 +32,10 @@ test("S044 S063 S090 S115 S121 S143 extension tools ask the user and register MC
 	process.env.PI_POPPY_CA = caPath;
 
 	const tools = new Map<string, { parameters: unknown; promptGuidelines?: string[]; execute: Function }>();
-	const commands = new Map<string, { handler: Function }>();
 	const servers: Array<{ name: string; config: unknown }> = [];
 	const pi = {
 		registerTool(tool: { name: string; parameters: unknown; promptGuidelines?: string[]; execute: Function }) {
 			tools.set(tool.name, tool);
-		},
-		registerCommand(name: string, options: { handler: Function }) {
-			commands.set(name, options);
 		},
 		registerMcpServer(name: string, config: unknown) {
 			servers.push({ name, config });
@@ -47,7 +43,7 @@ test("S044 S063 S090 S115 S121 S143 extension tools ask the user and register MC
 	};
 	poppy(pi as unknown as ExtensionAPI);
 	assert.equal(tools.has("poppy_discover"), true);
-	assert.equal(commands.has("poppy-connect"), true);
+	assert.equal(tools.has("poppy_session_start"), true);
 	const source = await readFile(new URL("../index.ts", import.meta.url), "utf8");
 	assert.equal(source.includes("mcp_servers_change"), false);
 	const signInParams = JSON.stringify(tools.get("poppy_sign_in")?.parameters);
@@ -76,20 +72,21 @@ test("S044 S063 S090 S115 S121 S143 extension tools ask the user and register MC
 	});
 
 	try {
-		const started = await tools.get("poppy_session_start")!.execute("1", { domain: lab.company.baseUrl }, undefined, undefined, ctx);
+		const domain = lab.company.baseUrl;
+		const started = await tools.get("poppy_session_start")!.execute("1", { domain }, undefined, undefined, ctx);
 		assert.equal(JSON.stringify(started).includes("st1_"), false);
 		assert.equal(JSON.stringify(started).includes("pat_"), false);
-		const signed = await tools.get("poppy_sign_in")!.execute("2", { scope: "poppy:read poppy:write", method: "direct" }, undefined, undefined, ctx);
+		const signed = await tools.get("poppy_sign_in")!.execute("2", { domain, scope: "poppy:read poppy:write", method: "direct" }, undefined, undefined, ctx);
 		assert.match(JSON.stringify(signed), /Signed in/);
 		assert.equal(JSON.stringify(signed).includes("pat_"), false);
-		await tools.get("poppy_mcp_connect")!.execute("3", {}, undefined, undefined, ctx);
+		await tools.get("poppy_mcp_connect")!.execute("3", { domain }, undefined, undefined, ctx);
 		assert.equal(servers.length, 1);
 		const mod = await import(pathToFileURL(join(process.cwd(), "node_modules/@earendil-works/pi-coding-agent/dist/core/mcp-servers.js")).href) as {
 			validateMcpServerConfig: (name: string, raw: unknown) => unknown;
 		};
 		const validated = mod.validateMcpServerConfig(servers[0]!.name, { ...servers[0]!.config as object, type: "http" });
 		assert.equal(typeof validated, "object");
-		const sent = await tools.get("poppy_conversation_send")!.execute("4", { text: "Please exchange the jacket", sender: "agent" }, undefined, undefined, ctx) as { details: { operations?: string[] } };
+		const sent = await tools.get("poppy_conversation_send")!.execute("4", { domain, text: "Please exchange the jacket", sender: "agent" }, undefined, undefined, ctx) as { details: { operations?: string[] } };
 		const operationId = sent.details.operations?.[0];
 		assert.ok(operationId);
 		let sawSummary = "";
@@ -98,7 +95,7 @@ test("S044 S063 S090 S115 S121 S143 extension tools ask the user and register MC
 			sawSummary = message;
 			return true;
 		};
-		const confirmed = await tools.get("poppy_operation_confirm")!.execute("5", { operation_id: operationId }, undefined, undefined, ctx);
+		const confirmed = await tools.get("poppy_operation_confirm")!.execute("5", { domain, operation_id: operationId }, undefined, undefined, ctx);
 		assert.equal(sawSummary.length > 0, true);
 		assert.match(JSON.stringify(confirmed), /Exchange placed|in_progress|succeeded/);
 		assert.equal(JSON.stringify(confirmed).includes("pat_"), false);

@@ -17,8 +17,7 @@ test("S002 S040 two pi-poppy processes talk over HTTPS", async () => {
 	const paths = certPaths(tls);
 	const child = spawn(process.execPath, [
 		"--experimental-strip-types",
-		"cli.ts",
-		"company",
+		"tests/company-peer.ts",
 		"--cert",
 		paths.cert,
 		"--key",

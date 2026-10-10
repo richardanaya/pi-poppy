@@ -5,7 +5,9 @@ import type { AgentToolResult, ExtensionAPI, ExtensionCommandContext, ExtensionC
 import { Type } from "typebox";
 import { standingCovers, userApproval, type StandingPermission } from "./src/approval.ts";
 import { PersonalAgent, type DiscoveredCompany, type LiveSession } from "./src/agent.ts";
+import { IdentityServer } from "./src/identity.ts";
 import { generateEs256, publicOnly } from "./src/jwt.ts";
+import { createTestMaterial } from "./src/tls.ts";
 import { randomId } from "./src/codec.ts";
 import { emptyState, FileStore, type SecretState, type Store } from "./src/store.ts";
 
@@ -22,73 +24,25 @@ const GUIDELINES = [
 
 interface Runtime {
 	agent?: PersonalAgent;
-	discovery?: DiscoveredCompany;
-	session?: LiveSession;
+	/** organization.domain -> live session. Several companies can be open at once. */
+	sessions: Map<string, LiveSession>;
 	store?: Store;
 	state?: SecretState;
+	identity?: IdentityServer;
+	ready: Promise<SecretState>;
 }
 
 export default function poppy(pi: ExtensionAPI): void {
-	const runtime: Runtime = {};
+	const runtime: Runtime = {
+		sessions: new Map(),
+		ready: Promise.resolve(undefined as unknown as SecretState),
+	};
+	runtime.ready = ensureState(runtime);
 
-	pi.registerCommand("poppy-setup", {
-		description: "Create or load the pi-poppy identity. Optional argument: client metadata URL.",
-		handler: async (args, ctx) => {
-			const state = await ensureState(runtime, args.trim() || undefined);
-			ctx.ui.notify(`pi-poppy ready. client_id ${state.clientId ?? "(run pi-poppy identity to publish one)"}`, "info");
-		},
-	});
-
-	pi.registerCommand("poppy-status", {
-		description: "Show the current company, session, and sign-in state. Tokens are not shown.",
-		handler: async (_args, ctx) => {
-			const text = runtime.session && runtime.agent ? JSON.stringify(runtime.agent.describe(runtime.session)) : "No Poppy session. Use /poppy-connect <domain>.";
-			ctx.ui.notify(text, "info");
-		},
-	});
-
-	pi.registerCommand("poppy-discover", {
-		description: "Fetch a company's poppy.json. Argument: domain or https URL.",
-		handler: async (args, ctx) => {
-			const found = await connect(runtime, args.trim(), false);
-			ctx.ui.notify(`${found.document.organization.name} (${found.document.organization.domain}) protocol ${found.document.protocol_version}`, "info");
-		},
-	});
-
-	pi.registerCommand("poppy-connect", {
-		description: "Discover a company and start a signed-out session. Argument: domain or https URL.",
-		handler: async (args, ctx) => {
-			const session = await connect(runtime, args.trim(), true);
-			ctx.ui.notify(`Session ${session.sessionId} with ${session.discovery.document.organization.name}`, "info");
-		},
-	});
-
-	pi.registerCommand("poppy-signin", {
-		description: "Sign the user in. Argument: OAuth scope, for example poppy:read.",
-		handler: async (args, ctx) => {
-			const session = await signIn(runtime, ctx, args.trim() || "poppy:read", "auto");
-			ctx.ui.notify(`Signed in: ${session.signedIn} scope ${session.scope}`, "info");
-		},
-	});
-
-	pi.registerCommand("poppy-signout", {
-		description: "Revoke the account token and continue the session signed out.",
-		handler: async (_args, ctx) => {
-			await signOut(runtime);
-			ctx.ui.notify("Signed out. The session continues without the account.", "info");
-		},
-	});
-
-	pi.registerCommand("poppy-mcp", {
-		description: "Register the company's MCP APIs with pi, using a PAP Bearer token.",
-		handler: async (_args, ctx) => {
-			const names = await connectMcp(runtime, pi);
-			ctx.ui.notify(names.length ? `MCP servers: ${names.join(", ")}` : "This company lists no MCP API.", "info");
-		},
-	});
-
+	const domainField = Type.String({ description: "Company domain or https URL of an open session" });
 	const domainParams = Type.Object({ domain: Type.String({ description: "Company domain or https URL" }) });
 	const scopeParams = Type.Object({
+		domain: domainField,
 		scope: Type.String({ description: "Space-separated OAuth scope" }),
 		method: Type.Optional(Type.String({ description: "auto, direct, device, or mediated" })),
 	});
@@ -130,12 +84,17 @@ export default function poppy(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "poppy_session_status",
 		label: "Poppy status",
-		description: "Describe the current session without revealing tokens.",
+		description: "Describe one open session, or every open session when domain is omitted. Tokens are omitted.",
 		promptGuidelines: GUIDELINES,
-		parameters: Type.Object({}),
-		async execute() {
-			if (!runtime.session || !runtime.agent) return fail("No session");
-			return ok("Session status", runtime.agent.describe(runtime.session));
+		parameters: Type.Object({ domain: Type.Optional(domainField) }),
+		async execute(_id, params) {
+			await runtime.ready;
+			if (!runtime.agent || runtime.sessions.size === 0) return fail("No session");
+			if (!params.domain) {
+				const sessions = [...runtime.sessions.values()].map((session) => runtime.agent!.describe(session));
+				return ok(`${sessions.length} open session${sessions.length === 1 ? "" : "s"}`, { sessions });
+			}
+			return ok("Session status", runtime.agent.describe(needSession(runtime, params.domain)));
 		},
 	});
 
@@ -147,7 +106,7 @@ export default function poppy(pi: ExtensionAPI): void {
 		promptGuidelines: GUIDELINES,
 		parameters: scopeParams,
 		async execute(_id, params, _signal, _onUpdate, ctx) {
-			const session = await signIn(runtime, ctx, params.scope, params.method ?? "auto");
+			const session = await signIn(runtime, ctx, params.domain, params.scope, params.method ?? "auto");
 			return ok(session.signedIn ? `Signed in with ${session.scope}` : "Sign-in did not complete", runtime.agent!.describe(session));
 		},
 	});
@@ -155,26 +114,27 @@ export default function poppy(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "poppy_sign_out",
 		label: "Poppy sign out",
-		description: "Revoke the account token. The session continues signed out.",
+		description: "Revoke the account token for one company. That session continues signed out.",
 		promptGuidelines: GUIDELINES,
-		parameters: Type.Object({}),
-		async execute() {
-			await signOut(runtime);
-			return ok("Signed out", runtime.agent!.describe(runtime.session!));
+		parameters: Type.Object({ domain: domainField }),
+		async execute(_id, params) {
+			const session = await signOut(runtime, params.domain);
+			return ok("Signed out", runtime.agent!.describe(session));
 		},
 	});
 
 	pi.registerTool({
 		name: "poppy_api_call",
 		label: "Poppy API",
-		description: "Call one of the company's OpenAPI endpoints with the current DPoP session token.",
+		description: "Call one of the company's OpenAPI endpoints with that session's DPoP token.",
 		promptGuidelines: GUIDELINES,
 		parameters: Type.Object({
+			domain: domainField,
 			path: Type.String({ description: "Path on the company origin, such as /orders/ord_1/exchanges" }),
 			body: Type.Optional(Type.Unknown()),
 		}),
 		async execute(_id, params) {
-			const session = needSession(runtime);
+			const session = needSession(runtime, params.domain);
 			const origin = new URL(session.discovery.poppyUrl).origin;
 			const url = new URL(params.path, origin);
 			if (url.origin !== origin) return fail("Refusing to call a different origin");
@@ -186,9 +146,10 @@ export default function poppy(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "poppy_conversation_send",
 		label: "Poppy send",
-		description: "Send a message in the company conversation. sender human is only for the user's own words.",
+		description: "Send a message in one company's conversation. sender human is only for the user's own words.",
 		promptGuidelines: GUIDELINES,
 		parameters: Type.Object({
+			domain: domainField,
 			text: Type.Optional(Type.String()),
 			sender: Type.String({ description: "agent or human" }),
 			data: Type.Optional(Type.Unknown()),
@@ -197,7 +158,7 @@ export default function poppy(pi: ExtensionAPI): void {
 			user_available: Type.Optional(Type.Boolean()),
 		}),
 		async execute(_id, params) {
-			const session = needSession(runtime);
+			const session = needSession(runtime, params.domain);
 			if (params.sender !== "agent" && params.sender !== "human") return fail("sender must be agent or human");
 			const context = contextOf(params);
 			const sent = await runtime.agent!.sendMessage(session, {
@@ -218,9 +179,9 @@ export default function poppy(pi: ExtensionAPI): void {
 		label: "Poppy read",
 		description: "Read new conversation events. Unknown event types and text-delta pieces are skipped. A gap means earlier history was dropped.",
 		promptGuidelines: GUIDELINES,
-		parameters: Type.Object({ wait: Type.Optional(Type.Number()) }),
+		parameters: Type.Object({ domain: domainField, wait: Type.Optional(Type.Number()) }),
 		async execute(_id, params) {
-			const session = needSession(runtime);
+			const session = needSession(runtime, params.domain);
 			const events = await runtime.agent!.readEvents(session, { wait: params.wait });
 			const lines = runtime.agent!.actionableText(events.events);
 			if (events.gap) lines.unshift("Part of this conversation is missing. Tell the user.");
@@ -233,9 +194,9 @@ export default function poppy(pi: ExtensionAPI): void {
 		label: "Poppy handoff",
 		description: "Ask the company to hand the conversation to a person.",
 		promptGuidelines: GUIDELINES,
-		parameters: Type.Object({}),
-		async execute() {
-			const session = needSession(runtime);
+		parameters: Type.Object({ domain: domainField }),
+		async execute(_id, params) {
+			const session = needSession(runtime, params.domain);
 			const result = await runtime.agent!.handoff(session);
 			return ok(`${result.status} ${result.responder}`, result);
 		},
@@ -244,11 +205,11 @@ export default function poppy(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "poppy_conversation_close",
 		label: "Poppy close",
-		description: "Close the current conversation.",
+		description: "Close the conversation open with one company.",
 		promptGuidelines: GUIDELINES,
-		parameters: Type.Object({}),
-		async execute() {
-			const session = needSession(runtime);
+		parameters: Type.Object({ domain: domainField }),
+		async execute(_id, params) {
+			const session = needSession(runtime, params.domain);
 			const result = await runtime.agent!.closeConversation(session);
 			return ok(result.status, result);
 		},
@@ -257,11 +218,11 @@ export default function poppy(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "poppy_direct_conversation",
 		label: "Poppy direct",
-		description: "Open a direct conversation with a person, attached to the current conversation.",
+		description: "Open a direct conversation with a person, attached to that company's conversation.",
 		promptGuidelines: GUIDELINES,
-		parameters: Type.Object({ text: Type.String() }),
+		parameters: Type.Object({ domain: domainField, text: Type.String() }),
 		async execute(_id, params) {
-			const session = needSession(runtime);
+			const session = needSession(runtime, params.domain);
 			const parent = session.conversationId;
 			if (!parent) return fail("Start a conversation first");
 			session.conversationId = undefined;
@@ -275,9 +236,9 @@ export default function poppy(pi: ExtensionAPI): void {
 		label: "Poppy operation",
 		description: "Read an operation. Showing it does not approve it.",
 		promptGuidelines: GUIDELINES,
-		parameters: Type.Object({ operation_id: Type.String() }),
+		parameters: Type.Object({ domain: domainField, operation_id: Type.String() }),
 		async execute(_id, params) {
-			const session = needSession(runtime);
+			const session = needSession(runtime, params.domain);
 			const operation = await runtime.agent!.readOperation(session, params.operation_id);
 			return ok(operation.summary, { operation });
 		},
@@ -288,9 +249,9 @@ export default function poppy(pi: ExtensionAPI): void {
 		label: "Poppy confirm",
 		description: "Confirm an operation after the user approves the company's name and summary in pi, or a standing permission covers every term.",
 		promptGuidelines: GUIDELINES,
-		parameters: Type.Object({ operation_id: Type.String() }),
+		parameters: Type.Object({ domain: domainField, operation_id: Type.String() }),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
-			const session = needSession(runtime);
+			const session = needSession(runtime, params.domain);
 			const operation = await runtime.agent!.readOperation(session, params.operation_id);
 			const issuer = session.discovery.metadata?.issuer ?? "";
 			const standing = (await runtime.agent!.permissions()).find((permission) => standingCovers(permission, operation, issuer).ok);
@@ -312,9 +273,9 @@ export default function poppy(pi: ExtensionAPI): void {
 		label: "Poppy cancel",
 		description: "Cancel a proposed or in-progress operation.",
 		promptGuidelines: GUIDELINES,
-		parameters: Type.Object({ operation_id: Type.String() }),
+		parameters: Type.Object({ domain: domainField, operation_id: Type.String() }),
 		async execute(_id, params) {
-			const session = needSession(runtime);
+			const session = needSession(runtime, params.domain);
 			const operation = await runtime.agent!.cancelOperation(session, params.operation_id);
 			return ok(operation.result?.summary ?? operation.state, { operation });
 		},
@@ -323,16 +284,17 @@ export default function poppy(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "poppy_permission",
 		label: "Poppy permission",
-		description: "Ask the user to store a standing permission for one action at this company.",
+		description: "Ask the user to store a standing permission for one action at one company.",
 		promptGuidelines: GUIDELINES,
 		parameters: Type.Object({
+			domain: domainField,
 			action: Type.String(),
 			max_amount: Type.Optional(Type.String()),
 			currency: Type.Optional(Type.String()),
 			max_uses: Type.Optional(Type.Number()),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
-			const session = needSession(runtime);
+			const session = needSession(runtime, params.domain);
 			const companyName = session.discovery.document.organization.name;
 			const summary = `Allow ${params.action} at ${companyName}` + (params.max_amount ? ` up to ${params.max_amount} ${params.currency ?? ""}` : "");
 			const accepted = await ctx.ui.confirm(companyName, summary);
@@ -357,9 +319,9 @@ export default function poppy(pi: ExtensionAPI): void {
 		label: "Poppy MCP",
 		description: "Give pi a PAP Bearer token for each MCP API and register it with pi's built-in MCP client.",
 		promptGuidelines: GUIDELINES,
-		parameters: Type.Object({}),
-		async execute() {
-			const names = await connectMcp(runtime, pi);
+		parameters: Type.Object({ domain: domainField }),
+		async execute(_id, params) {
+			const names = await connectMcp(runtime, pi, params.domain);
 			return ok(names.length ? `Registered ${names.join(", ")}` : "No MCP API", { servers: names });
 		},
 	});
@@ -369,9 +331,12 @@ export default function poppy(pi: ExtensionAPI): void {
 		label: "Poppy browser",
 		description: "Join the agent's own browser session before opening a page on the company site. Does not use the user's browser.",
 		promptGuidelines: GUIDELINES,
-		parameters: Type.Object({ url: Type.String({ description: "HTTPS page on the company domain" }) }),
+		parameters: Type.Object({
+			domain: domainField,
+			url: Type.String({ description: "HTTPS page on the company domain" }),
+		}),
 		async execute(_id, params) {
-			const session = needSession(runtime);
+			const session = needSession(runtime, params.domain);
 			await runtime.agent!.joinBrowser(session, params.url);
 			const page = await runtime.agent!.browse(session, params.url);
 			return ok(`HTTP ${page.status}`, { status: page.status, browserJoined: session.browserJoined });
@@ -384,22 +349,19 @@ async function connect(runtime: Runtime, input: string, start: true): Promise<Li
 async function connect(runtime: Runtime, input: string, start: boolean): Promise<DiscoveredCompany | LiveSession> {
 	const agent = await ensureAgent(runtime);
 	const discovery = await agent.discover(input);
-	runtime.discovery = discovery;
 	if (!start) return discovery;
 	const session = await agent.startSession(discovery);
-	runtime.session = session;
-	return session;
+	return rememberSession(runtime, session);
 }
 
-async function signIn(runtime: Runtime, ctx: ExtensionContext | ExtensionCommandContext, scope: string, method: string): Promise<LiveSession> {
-	const session = needSession(runtime);
+async function signIn(runtime: Runtime, ctx: ExtensionContext | ExtensionCommandContext, domain: string, scope: string, method: string): Promise<LiveSession> {
+	const session = needSession(runtime, domain);
 	const agent = runtime.agent!;
 	const auth = session.discovery.document.auth;
 	if (!auth) throw new Error("company has no sign-in");
 	if (await agent.accountCovers(auth.issuer, scope.split(" "))) {
 		const renewed = await agent.useAccount(session, scope, session.sessionId);
-		runtime.session = renewed;
-		return renewed;
+		return rememberSession(runtime, renewed);
 	}
 	const order = method === "auto" ? (["direct", "device", "mediated"] as const) : ([method] as const);
 	for (const kind of order) {
@@ -416,8 +378,7 @@ async function finishDirect(runtime: Runtime, ctx: ExtensionContext | ExtensionC
 	const callback = await ctx.ui.input("Callback URL", started.url);
 	if (!callback) throw new Error("sign-in cancelled");
 	const next = await runtime.agent!.completeDirectSignIn(callback.trim());
-	runtime.session = next;
-	return next;
+	return rememberSession(runtime, next);
 }
 
 async function finishDevice(runtime: Runtime, ctx: ExtensionContext | ExtensionCommandContext, session: LiveSession, scope: string): Promise<LiveSession> {
@@ -427,10 +388,7 @@ async function finishDevice(runtime: Runtime, ctx: ExtensionContext | ExtensionC
 	let current = login;
 	while (Date.now() < deadline) {
 		const polled = await runtime.agent!.pollDeviceSignIn(current, { wait: true });
-		if (!polled.pending) {
-			runtime.session = polled.session;
-			return polled.session;
-		}
+		if (!polled.pending) return rememberSession(runtime, polled.session);
 		current = polled.login;
 	}
 	throw new Error("device sign-in timed out");
@@ -451,21 +409,20 @@ async function finishMediated(runtime: Runtime, ctx: ExtensionContext | Extensio
 		if (!code) throw new Error("sign-in cancelled");
 		const done = await runtime.agent!.submitMediatedCode(session, result.signInId, code);
 		if (!done.session) throw new Error(done.status);
-		runtime.session = done.session;
-		return done.session;
+		return rememberSession(runtime, done.session);
 	}
 	if (!result.session) throw new Error(result.status);
-	runtime.session = result.session;
-	return result.session;
+	return rememberSession(runtime, result.session);
 }
 
-async function signOut(runtime: Runtime): Promise<void> {
-	const session = needSession(runtime);
+async function signOut(runtime: Runtime, domain: string): Promise<LiveSession> {
+	const session = needSession(runtime, domain);
 	await runtime.agent!.revoke(session);
+	return session;
 }
 
-async function connectMcp(runtime: Runtime, pi: ExtensionAPI): Promise<string[]> {
-	const session = needSession(runtime);
+async function connectMcp(runtime: Runtime, pi: ExtensionAPI, domain: string): Promise<string[]> {
+	const session = needSession(runtime, domain);
 	const names: string[] = [];
 	for (const api of runtime.agent!.supportedApis(session.discovery.document)) {
 		if (api.type !== "mcp") continue;
@@ -478,9 +435,9 @@ async function connectMcp(runtime: Runtime, pi: ExtensionAPI): Promise<string[]>
 
 async function ensureAgent(runtime: Runtime): Promise<PersonalAgent> {
 	if (runtime.agent) return runtime.agent;
-	const state = await ensureState(runtime);
+	const state = await runtime.ready;
 	if (!state.clientId || !state.redirectUris?.length) {
-		throw new Error("Set a client_id with /poppy-setup or pi-poppy identity");
+		throw new Error("This agent has no client_id yet. A company has to be able to download the client metadata from an HTTPS URL.");
 	}
 	const ca = process.env.PI_POPPY_CA ? await readFile(process.env.PI_POPPY_CA, "utf8") : undefined;
 	runtime.agent = new PersonalAgent({
@@ -496,7 +453,7 @@ async function ensureAgent(runtime: Runtime): Promise<PersonalAgent> {
 	return runtime.agent;
 }
 
-async function ensureState(runtime: Runtime, clientId?: string): Promise<SecretState> {
+async function ensureState(runtime: Runtime): Promise<SecretState> {
 	runtime.store ??= new FileStore(process.env.PI_POPPY_STORE || join(homedir(), ".pi", "poppy.json"));
 	let state = runtime.state ?? (await runtime.store.load());
 	if (!state) {
@@ -508,19 +465,51 @@ async function ensureState(runtime: Runtime, clientId?: string): Promise<SecretS
 			signingPublicJwk: publicOnly(generated.publicJwk),
 		});
 	}
-	if (clientId) {
-		state.clientId = clientId;
-		const origin = new URL(clientId).origin;
-		state.redirectUris = [`${origin}/oauth/callback`];
-	}
+	if (!state.clientId || !state.redirectUris?.length) await publishLocalIdentity(runtime, state);
+	else if (state.localIdentity && !runtime.identity) await serveLocalIdentity(runtime, state);
 	runtime.state = state;
 	await runtime.store.save(state);
 	return state;
 }
 
-function needSession(runtime: Runtime): LiveSession {
-	if (!runtime.session || !runtime.agent) throw new Error("Start a session first");
-	return runtime.session;
+async function publishLocalIdentity(runtime: Runtime, state: SecretState): Promise<void> {
+	const tls = createTestMaterial();
+	state.localIdentity = { cert: tls.certPem, key: tls.keyPem, ca: tls.caPem, port: 0 };
+	await serveLocalIdentity(runtime, state);
+}
+
+async function serveLocalIdentity(runtime: Runtime, state: SecretState): Promise<void> {
+	const local = state.localIdentity;
+	if (!local) return;
+	const identity = new IdentityServer({
+		cert: local.cert,
+		key: local.key,
+		clientName: state.clientName,
+		signingPublicJwk: publicOnly(state.signingPublicJwk),
+		kid: state.signingKid,
+		port: local.port || undefined,
+	});
+	await identity.start();
+	local.port = Number(new URL(identity.clientId).port);
+	state.clientId = identity.clientId;
+	state.redirectUris = [identity.redirectUri];
+	runtime.identity = identity;
+}
+
+function rememberSession(runtime: Runtime, session: LiveSession): LiveSession {
+	runtime.sessions.set(session.discovery.document.organization.domain, session);
+	return session;
+}
+
+function needSession(runtime: Runtime, domain: string): LiveSession {
+	const host = domain.includes("://") ? new URL(domain).hostname : domain;
+	const stripped = host.replace(/^www\./, "");
+	for (const session of runtime.sessions.values()) {
+		const org = session.discovery.document.organization.domain;
+		const requested = session.discovery.requestedHost;
+		if (org === host || org === stripped || requested === host || requested === stripped) return session;
+	}
+	throw new Error(`No session for ${domain}. Call poppy_session_start.`);
 }
 
 function contextOf(params: { locale?: string; time_zone?: string; user_available?: boolean }): Record<string, unknown> | undefined {

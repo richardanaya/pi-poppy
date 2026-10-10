@@ -1,6 +1,6 @@
 # pi-poppy
 
-Personal Agent Protocol (Poppy) for the [pi](https://github.com/earendil-works/pi) coding agent. A personal agent discovers a company, opens a signed-out session, signs the user in, calls the company's APIs, and talks to its company agent. This package is the personal-agent side that pi loads, plus a company peer used by the conformance tests.
+Version 0.1.0. Personal Agent Protocol (Poppy) for the [pi](https://github.com/earendil-works/pi) coding agent. A personal agent discovers a company, opens a signed-out session, signs the user in, calls the company's APIs, and talks to its company agent. This package is the personal-agent side that pi loads. The conformance tests include their own company peer. There is no `pi-poppy` command.
 
 The implementation follows [Personal Agent Protocol draft 0.1](https://personalagentprotocol.org/) as published on 9 October 2026. The site has no JSON Schema, no official conformance suite, and no published reference implementation. The checklist in `src/requirements.ts` is this package's reading of every MUST, SHOULD, and MAY on the spec, extensions, and guides pages. Payments, push notifications, and attachments are open topics and are not part of this draft.
 
@@ -23,49 +23,23 @@ npm test
 npm run typecheck
 ```
 
-## Configuration
+## First load
 
-Secrets live in `~/.pi/poppy.json` (mode 0600), or in the file named by `PI_POPPY_STORE`. The file holds the agent's signing key, one stable user id per company, one DPoP key per user per company, account tokens, and standing permissions. Tool results and `/poppy-status` do not include those secrets.
+Loading the extension creates `~/.pi/poppy.json` (mode 0600) when that file is missing. The file holds the agent's signing key, one stable user id per company, one DPoP key per user per company, account tokens, and standing permissions. The first load also creates a `client_id` and serves that metadata document on `127.0.0.1` for as long as pi is running. Later loads keep the same URL and port. Tool results do not include those secrets.
 
-| Variable | Purpose |
-| --- | --- |
-| `PI_POPPY_STORE` | Secret-store path. Default `~/.pi/poppy.json`. |
-| `PI_POPPY_ALLOW_LOOPBACK` | Set to `1` to permit `127.0.0.1` and `localhost`. Production leaves this unset. |
-| `PI_POPPY_CA` | PEM path for a private CA. Tests use this. Public companies use the system trust store. |
-
-Publish the client metadata document before the first session. `client_id` is that document's HTTPS URL.
-
-```bash
-pi-poppy identity --store ~/.pi/poppy.json --cert server.crt --key server.key
-```
-
-`pi-poppy company` starts the reference company peer on HTTPS. It is the other side of the end-to-end test, not something a personal agent needs in production.
-
-```bash
-pi-poppy company --cert server.crt --key server.key --allow-loopback
-```
-
-## Commands
-
-| Command | What it does |
-| --- | --- |
-| `/poppy-setup` | Create or load the identity. Optional argument: client metadata URL. |
-| `/poppy-status` | Company, session, and sign-in state. Tokens are omitted. |
-| `/poppy-discover <domain>` | Fetch `poppy.json` and the company's OAuth metadata. |
-| `/poppy-connect <domain>` | Discover the company and start a signed-out session. |
-| `/poppy-signin [scope]` | Sign the user in. Default scope `poppy:read`. |
-| `/poppy-signout` | Revoke the account token. The session continues signed out. |
-| `/poppy-mcp` | Register the company's MCP APIs with pi. |
+A company downloads that `client_id` before it will open a session. `jwks_uri` and `redirect_uris` are HTTPS on the same host. A company on another machine cannot fetch `127.0.0.1`. The tests serve their own company and metadata. `PI_POPPY_STORE`, `PI_POPPY_ALLOW_LOOPBACK`, and `PI_POPPY_CA` exist for those tests. A public company is reached with the system trust store, and loopback is refused.
 
 ## Tools
+
+Each tool that uses a session takes `domain`, so more than one company can be open. There are no slash commands.
 
 | Tool | What it does |
 | --- | --- |
 | `poppy_discover` | Read the company's protocol document. |
-| `poppy_session_start` | Start a signed-out session. |
-| `poppy_session_status` | Describe the session without tokens. |
-| `poppy_sign_in` | Direct, then device, then mediated sign-in. Passwords are collected in pi's own UI. |
-| `poppy_sign_out` | Revoke the account token. |
+| `poppy_session_start` | Start a signed-out session for that domain. |
+| `poppy_session_status` | Describe one session, or every open session when `domain` is omitted. Tokens are omitted. |
+| `poppy_sign_in` | Direct, then device, then mediated sign-in for that domain. Passwords are collected in pi's own UI. |
+| `poppy_sign_out` | Revoke that domain's account token. |
 | `poppy_api_call` | Call an OpenAPI endpoint on the company origin with a DPoP session token. |
 | `poppy_conversation_send` | Send a message. `sender` is `human` only for the user's own words. |
 | `poppy_conversation_read` | Read events. A gap is reported when the cursor has expired. |
@@ -79,13 +53,31 @@ pi-poppy company --cert server.crt --key server.key --allow-loopback
 | `poppy_mcp_connect` | Register the company's MCP servers on pi. |
 | `poppy_browser_join` | Post a browser-session assertion from the agent's own cookie jar. |
 
+## Examples
+
+Each example is a local HTTPS company with its own certificate. That certificate is not the agent's. Set `PI_POPPY_CA` to the company CA the process prints, and `PI_POPPY_ALLOW_LOOPBACK=1`, before the agent fetches it. Set `TODO_AGENT_CA` to the agent's CA (`localIdentity.ca` in the secret file) so the company can download `client_id`.
+
+| Directory | What it publishes |
+| --- | --- |
+| `examples/simple_website` | `web` only. No sign-in and no session. |
+| `examples/todo_website` | A website with in-memory users and todos, plus an OAuth issuer so an agent can start a signed-out session. Website login is separate from that session. |
+| `examples/todos_api` | An OpenAPI document. `poppy_api_call` lists, adds, and completes todos for the agent's user id. |
+| `examples/todos_mcp` | An MCP endpoint. `poppy_mcp_connect` registers `list_todos`, `add_todo`, and `complete_todo`. |
+
+```bash
+node --experimental-strip-types examples/simple_website/server.ts
+TODO_AGENT_CA=agent-ca.pem node --experimental-strip-types examples/todo_website/server.ts
+TODO_AGENT_CA=agent-ca.pem node --experimental-strip-types examples/todos_api/server.ts
+TODO_AGENT_CA=agent-ca.pem node --experimental-strip-types examples/todos_mcp/server.ts
+```
+
 ## MCP
 
 pi 1.0.1 already ships an MCP client. This extension uses that client and does not open a second one.
 
-Company MCP APIs are handed to `pi.registerMcpServer`. The config is an HTTP server whose `Authorization` header is a PAP bearer session token. The token's `resource` is the MCP URL, and it is minted without a DPoP proof, which is what the protocol requires for MCP. `exposure` is `direct`, so the model sees tools named `mcp__<server>__<tool>`. The server name contains no `oauth` field: pi runs its own OAuth client only when that field is set and no `Authorization` header is present. PAP clients must present the session token the company issued, so pi's OAuth flow is the wrong client for this API. Call `/poppy-mcp` again when the bearer expires; registration replaces the server config.
+Company MCP APIs are handed to `pi.registerMcpServer`. The config is an HTTP server whose `Authorization` header is a PAP bearer session token. The token's `resource` is the MCP URL, and it is minted without a DPoP proof, which is what the protocol requires for MCP. `exposure` is `direct`, so the model sees tools named `mcp__<server>__<tool>`. The server name contains no `oauth` field: pi runs its own OAuth client only when that field is set and no `Authorization` header is present. PAP clients must present the session token the company issued, so pi's OAuth flow is the wrong client for this API. Call `poppy_mcp_connect` again for that domain when the bearer expires; registration replaces the server config.
 
-Everything else stays a pi tool or slash command:
+Everything else stays a pi tool:
 
 - Conversations, OpenAPI calls, DPoP proofs, and browser-session assertions are PAP messages, not MCP tools.
 - Sign-in and operation approval have to use `ctx.ui`. An MCP tool result cannot collect a password or show the company's summary for a yes/no answer.

@@ -26,6 +26,8 @@ export interface SecretState {
 	/** HTTPS client metadata URL. */
 	clientId?: string;
 	redirectUris?: string[];
+	/** Certificate for the client_id served on this machine. */
+	localIdentity?: { cert: string; key: string; ca: string; port: number };
 	/** local user key -> issuer -> company record */
 	users: Record<string, Record<string, StoredCompany>>;
 	permissions: StandingPermission[];
